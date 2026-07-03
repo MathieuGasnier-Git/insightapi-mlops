@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import LoginButton from "@/components/LoginButton";
+import Footer from "@/components/Footer";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -34,6 +35,7 @@ export default function RootLayout({
           <LoginButton />
         </header>
         <main className="flex flex-1 flex-col">{children}</main>
+        <Footer />
       </body>
     </html>
   );
