@@ -1,0 +1,221 @@
+name: CI - PR to dev
+
+on:
+  pull_request:
+    branches: [dev]
+
+concurrency:
+  group: ci-pr-to-dev-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint-frontend:
+    name: Lint - frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+
+  lint-backend-main:
+    name: Lint - backend-main
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend-main/package-lock.json
+      - run: npm install
+      - run: npm run lint
+
+  lint-service-2:
+    name: Lint - service-2
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: service-2/package-lock.json
+      - run: npm install
+      - run: npm run lint
+
+  lint-ml-service:
+    name: Lint - ml-service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ml-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: ml-service/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+
+  test-backend-main:
+    name: Unit tests - backend-main
+    needs: lint-backend-main
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend-main/package-lock.json
+      - run: npm install
+      - run: npm test
+
+  test-ml-service:
+    name: Unit tests - ml-service
+    needs: lint-ml-service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ml-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: ml-service/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  integration-tests:
+    name: Integration tests (backend-main + service-2 against real DBs)
+    needs: [test-backend-main, test-ml-service, lint-service-2, lint-frontend]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: insightapi
+          POSTGRES_PASSWORD: insightapi
+          POSTGRES_DB: insightapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U insightapi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install backend-main
+        working-directory: backend-main
+        run: npm install
+
+      - name: Boot backend-main against real Postgres
+        working-directory: backend-main
+        env:
+          DATABASE_URL: postgres://insightapi:insightapi@localhost:5432/insightapi
+          PORT: 3000
+        run: |
+          npx tsx src/index.ts &
+          echo $! > server.pid
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:3000/health && break
+            sleep 1
+          done
+
+      - name: Check backend-main /health reports a real DB connection
+        run: |
+          curl -sf http://localhost:3000/health | tee /tmp/health.json
+          grep -q '"status":"ok"' /tmp/health.json
+          grep -q '"db":"connected"' /tmp/health.json
+
+      - name: Stop backend-main
+        if: always()
+        working-directory: backend-main
+        run: kill "$(cat server.pid)" || true
+
+      - name: Install service-2
+        working-directory: service-2
+        run: npm install
+
+      - name: Boot service-2 against real MongoDB
+        working-directory: service-2
+        env:
+          MONGODB_URI: mongodb://localhost:27017/insightapi
+          PORT: 4002
+        run: |
+          node src/index.js &
+          echo $! > server.pid
+          for i in $(seq 1 20); do
+            curl -sf -X POST http://localhost:4002/ -H 'Content-Type: application/json' -d '{"query":"{ __typename }"}' && break
+            sleep 1
+          done
+
+      - name: Create a review through the real GraphQL + MongoDB stack
+        run: |
+          curl -sf -X POST http://localhost:4002/ \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"mutation { createReview(input: { text: \"Great API!\", sentiment: POSITIVE }) { id text sentiment } }"}' \
+            | tee /tmp/create.json
+          grep -q 'Great API!' /tmp/create.json
+
+      - name: Read the review back from MongoDB
+        run: |
+          curl -sf -X POST http://localhost:4002/ \
+            -H 'Content-Type: application/json' \
+            -d '{"query":"{ reviews { text sentiment } }"}' \
+            | tee /tmp/reviews.json
+          grep -q 'Great API!' /tmp/reviews.json
+
+      - name: Stop service-2
+        if: always()
+        working-directory: service-2
+        run: kill "$(cat server.pid)" || true
+
+  build-docker-images:
+    name: Build Docker images (no push)
+    needs: [integration-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build frontend image
+        run: docker build -t insightapi/frontend:ci ./frontend
+
+      - name: Build backend-main image
+        run: docker build -t insightapi/backend-main:ci ./backend-main
+
+      - name: Build service-2 image
+        run: docker build -t insightapi/service-2:ci ./service-2
+
+      - name: Build ml-service image
+        run: docker build -t insightapi/ml-service:ci ./ml-service

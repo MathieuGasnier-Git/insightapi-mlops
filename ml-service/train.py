@@ -56,7 +56,9 @@ def main() -> None:
             ("tfidf", TfidfVectorizer(max_features=params["max_features"], ngram_range=(1, 2))),
             (
                 "clf",
-                LogisticRegression(max_iter=params["max_iter"], random_state=params["random_state"]),
+                LogisticRegression(
+                    max_iter=params["max_iter"], random_state=params["random_state"]
+                ),
             ),
         ]
     )
