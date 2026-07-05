@@ -7,15 +7,17 @@ import mlflow.sklearn
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
 
 ML_SERVICE_DIR = Path(__file__).resolve().parent
-DATA_PATH = ML_SERVICE_DIR / "data" / "raw" / "iris.csv"
-DVC_FILE_PATH = ML_SERVICE_DIR / "data" / "raw" / "iris.csv.dvc"
-EXPERIMENT_NAME = "iris-classifier"
-MODEL_NAME = "insightapi-iris-classifier"
+DATA_PATH = ML_SERVICE_DIR / "data" / "raw" / "imdb.csv"
+DVC_FILE_PATH = ML_SERVICE_DIR / "data" / "raw" / "imdb.csv.dvc"
+EXPERIMENT_NAME = "sentiment-classifier"
+MODEL_NAME = "insightapi-sentiment-classifier"
 
 
 def get_git_commit_hash() -> str:
@@ -37,14 +39,27 @@ def main() -> None:
     mlflow.set_experiment(EXPERIMENT_NAME)
 
     df = pd.read_csv(DATA_PATH)
-    feature_cols = [c for c in df.columns if c not in ("target", "target_name")]
-    X, y = df[feature_cols], df["target"]
+    X, y = df["text"], df["sentiment"]
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    params = {"model_type": "LogisticRegression", "max_iter": 200, "random_state": 42}
-    model = LogisticRegression(max_iter=params["max_iter"], random_state=params["random_state"])
+    params = {
+        "model_type": "TfidfVectorizer+LogisticRegression",
+        "max_features": 20000,
+        "ngram_range": "(1, 2)",
+        "max_iter": 200,
+        "random_state": 42,
+    }
+    model = Pipeline(
+        [
+            ("tfidf", TfidfVectorizer(max_features=params["max_features"], ngram_range=(1, 2))),
+            (
+                "clf",
+                LogisticRegression(max_iter=params["max_iter"], random_state=params["random_state"]),
+            ),
+        ]
+    )
 
     with mlflow.start_run():
         model.fit(X_train, y_train)
