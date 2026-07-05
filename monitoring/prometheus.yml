@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ml-service /metrics — confirmed against the real merged code
+  # (ml-service/api.py + ml-service/README.md, feature/prometheus-metrics,
+  # PR #15), not estimated:
+  #   - port 8000: ml-service/Dockerfile CMD is
+  #     `uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}`
+  #   - path /metrics: `@app.get("/metrics")` in api.py, manual
+  #     prometheus_client instrumentation (no prometheus-fastapi-instrumentator)
+  #   - real metric names (verified by importing api.py and calling
+  #     generate_latest(), not just read off the source):
+  #       ml_service_prediction_requests_total          (counter)
+  #       ml_service_prediction_requests_failed_total    (counter)
+  #       ml_service_prediction_request_latency_seconds  (histogram)
+  #       ml_service_uptime_seconds                      (gauge)
+  #       ml_service_health_status                       (gauge, 1=healthy)
+  - job_name: "ml-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ml-service:8000"]
