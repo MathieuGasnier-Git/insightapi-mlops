@@ -2,17 +2,15 @@
 // Running the real model (MLflow/DagsHub download, scikit-learn inference)
 // in CI would be slow and require external credentials, so this returns a
 // fixed, deterministic response matching the real /predict contract.
-const http = require("http");
+import http from "http";
 
 const port = process.env.STUB_ML_PORT || 8010;
-
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok" }));
     return;
   }
-
   if (req.method === "POST" && req.url === "/predict") {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
@@ -29,11 +27,9 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-
   res.writeHead(404);
   res.end();
 });
-
 server.listen(port, () => {
   console.log(`stub ml-service listening on port ${port}`);
 });
