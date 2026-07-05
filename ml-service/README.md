@@ -27,20 +27,37 @@ cd ml-service
 dvc pull
 ```
 
-This downloads the files tracked by the `.dvc` files (e.g. `data/raw/iris.csv`)
+This downloads the files tracked by the `.dvc` files (e.g. `data/raw/imdb.csv`)
 into your working copy.
 
 ## Training
 
-`train.py` trains a simple `LogisticRegression` classifier on the DVC-tracked
-Iris dataset and logs the run to our DagsHub MLflow server: parameters,
-metrics, the DVC data version (md5 of `data/raw/iris.csv.dvc`), and the
-current git commit hash. The trained model is registered in the MLflow Model
-Registry as `insightapi-iris-classifier` and moved to the `Staging` stage.
+`train.py` trains a `TfidfVectorizer` + `LogisticRegression` sentiment
+classifier (positive/negative) on the DVC-tracked IMDB movie reviews dataset
+and logs the run to our DagsHub MLflow server: parameters, metrics, the DVC
+data version (md5 of `data/raw/imdb.csv.dvc`), and the current git commit
+hash. The trained model is registered in the MLflow Model Registry as
+`insightapi-sentiment-classifier` and moved to the `Staging` stage.
 
 ```bash
 cd ml-service
 cp .env.example .env   # fill in MLFLOW_TRACKING_USERNAME/PASSWORD with your DagsHub credentials
-dvc pull                # make sure data/raw/iris.csv is present
+dvc pull                # make sure data/raw/imdb.csv is present
 python3 train.py
 ```
+
+## API
+
+`api.py` serves a FastAPI app that loads the model tagged `Production` from
+the MLflow Model Registry at startup, falling back to `Staging` if no
+`Production` version exists yet.
+
+```bash
+cd ml-service
+cp .env.example .env   # fill in MLFLOW_TRACKING_USERNAME/PASSWORD with your DagsHub credentials
+uvicorn api:app --reload
+```
+
+- `GET /health` — liveness check
+- `POST /predict` — `{"text": "..."}` → `{"sentiment", "confidence", "model_version", "model_stage"}`
+- Interactive docs: `http://127.0.0.1:8000/docs` (Swagger UI) or `/redoc`
