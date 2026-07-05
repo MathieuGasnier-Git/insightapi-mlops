@@ -45,3 +45,19 @@ cp .env.example .env   # fill in MLFLOW_TRACKING_USERNAME/PASSWORD with your Dag
 dvc pull                # make sure data/raw/imdb.csv is present
 python3 train.py
 ```
+
+## API
+
+`api.py` serves a FastAPI app that loads the model tagged `Production` from
+the MLflow Model Registry at startup, falling back to `Staging` if no
+`Production` version exists yet.
+
+```bash
+cd ml-service
+cp .env.example .env   # fill in MLFLOW_TRACKING_USERNAME/PASSWORD with your DagsHub credentials
+uvicorn api:app --reload
+```
+
+- `GET /health` — liveness check
+- `POST /predict` — `{"text": "..."}` → `{"sentiment", "confidence", "model_version", "model_stage"}`
+- Interactive docs: `http://127.0.0.1:8000/docs` (Swagger UI) or `/redoc`

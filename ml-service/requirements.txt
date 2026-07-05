@@ -4,3 +4,5 @@ pandas
 scikit-learn
 pyyaml
 python-dotenv
+fastapi
+uvicorn[standard]
