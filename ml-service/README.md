@@ -82,6 +82,7 @@ file in the image:
 
 Without them, the app fails at startup (`lifespan`) trying to reach the
 DagsHub MLflow registry.
+
 ### Metrics
 
 `/metrics` is instrumented manually with `prometheus_client` (no
@@ -97,3 +98,42 @@ directly onto what's asked of this service:
 Request counting/timing happens in a middleware scoped to `/predict` so that
 validation errors (422, rejected before reaching the route handler) are
 still captured, not just exceptions raised inside it.
+
+## Quality gate (Staging → Production promotion)
+
+`quality_gate.py` runs as the last job of the `staging` CI/CD pipeline
+(`.github/workflows/cd-merge-to-staging.yml`), right after `ml-service` is
+deployed to the staging Railway environment. It gates whatever model version
+is currently in the `Staging` stage before letting it become `Production`:
+
+1. Looks up the latest `Staging` version of `insightapi-sentiment-classifier`
+   in the MLflow Model Registry.
+2. Checks that version's logged `accuracy` metric is at least
+   `ACCURACY_THRESHOLD` (default `0.75`, overridable via env var).
+3. Smoke-tests the staging deployment: polls `GET /health` (the model
+   artifact download on startup has been observed to take up to ~1 minute),
+   then calls `POST /predict` and checks the response has the expected
+   shape and a valid `sentiment` value.
+4. **Both checks must pass** for the version to be transitioned to
+   `Production` via `MlflowClient.transition_model_version_stage`. If either
+   fails, the script exits non-zero (failing the pipeline) and the registry
+   is left untouched — the candidate stays in `Staging`, `Production` never
+   changes.
+
+Run it locally against a running instance:
+
+```bash
+cd ml-service
+cp .env.example .env  # MLFLOW_TRACKING_URI/USERNAME/PASSWORD
+STAGING_ML_SERVICE_URL=http://127.0.0.1:8000 python3 quality_gate.py
+```
+
+CI needs these on top of the Railway/GHCR secrets already documented in the
+workflow file:
+
+- `secrets.MLFLOW_TRACKING_URI`, `secrets.MLFLOW_TRACKING_USERNAME`,
+  `secrets.MLFLOW_TRACKING_PASSWORD` — same DagsHub credentials used
+  elsewhere, added as repo/environment secrets so the CI runner (not just
+  the Railway container) can talk to the MLflow registry directly
+- `vars.STAGING_ML_SERVICE_URL` — the public URL of the staging `ml-service`
+  Railway deployment (not secret, just a variable)
