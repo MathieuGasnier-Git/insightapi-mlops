@@ -1,0 +1,172 @@
+name: CD - Merge to staging
+
+# Fires when dev is merged/pushed into staging.
+#
+# Deploys to Railway (RAILWAY_TOKEN + one RAILWAY_SERVICE_ID_* per service,
+# configured as secrets on the "staging" GitHub Environment). Railway builds
+# each service from its own Dockerfile at deploy time - see the comments in
+# the deploy-staging job for details and for the runtime env vars each
+# Railway service still needs configured on Railway's side (separate from
+# these GitHub secrets, which only authenticate the deploy trigger).
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: cd-merge-to-staging
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Test suite
+    uses: ./.github/workflows/test-suite.yml
+
+  build-and-push-images:
+    name: Build and push Docker images
+    needs: [tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-prefix: ${{ steps.vars.outputs.image_prefix }}
+      image-tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tags
+        id: vars
+        run: |
+          IMAGE_PREFIX=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_prefix=$IMAGE_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/frontend:staging
+            ${{ steps.vars.outputs.image_prefix }}/frontend:${{ steps.vars.outputs.image_tag }}
+
+      - name: Build and push backend-main
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend-main
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/backend-main:staging
+            ${{ steps.vars.outputs.image_prefix }}/backend-main:${{ steps.vars.outputs.image_tag }}
+
+      - name: Build and push service-2
+        uses: docker/build-push-action@v6
+        with:
+          context: ./service-2
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/service-2:staging
+            ${{ steps.vars.outputs.image_prefix }}/service-2:${{ steps.vars.outputs.image_tag }}
+
+      - name: Build and push ml-service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ml-service
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/ml-service:staging
+            ${{ steps.vars.outputs.image_prefix }}/ml-service:${{ steps.vars.outputs.image_tag }}
+
+  deploy-staging:
+    name: Deploy to staging (Railway)
+    needs: [build-and-push-images]
+    runs-on: ubuntu-latest
+    environment: staging
+    # Railway has no official GitHub Marketplace Action. The pattern below
+    # (container: ghcr.io/railwayapp/cli:latest + `railway up`) is Railway's
+    # own officially documented/recommended approach (docs.railway.com and
+    # blog.railway.com), so it's used here instead of a third-party action.
+    #
+    # Note: `railway up` has Railway build each service itself from the
+    # Dockerfile in its directory - it does not pull the image built and
+    # pushed to GHCR in the job above. That GHCR push still acts as a real
+    # build gate (this job only runs if it succeeded) and as an audit trail,
+    # but the artifact actually running on Railway is built independently.
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # frontend
+      # Runtime env needed on the Railway service itself (Railway dashboard
+      # or `railway variables --service ... --set`, NOT this workflow):
+      #   NEXTAUTH_URL, NEXTAUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+      #   NEXT_PUBLIC_BACKEND_URL, BACKEND_URL
+      # (not consumed by any code yet - NextAuth isn't wired into frontend/
+      # on dev as of this workflow, but the secrets already exist so the
+      # deploy step is ready the day that lands)
+      # ------------------------------------------------------------------
+      - name: Deploy frontend
+        working-directory: frontend
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_FRONTEND }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment staging --ci
+
+      # ------------------------------------------------------------------
+      # backend-main
+      # Runtime env needed on the Railway service: DATABASE_URL, JWT_SECRET,
+      # ML_SERVICE_URL, SERVICE_2_URL (must point at the staging URLs of
+      # ml-service/service-2 below, not localhost), PORT
+      # Note: JWT_SECRET / ML_SERVICE_URL / SERVICE_2_URL are only read once
+      # the gateway/auth routes (currently on fix/merge-gateway-into-dev,
+      # not yet merged to dev) land here.
+      # ------------------------------------------------------------------
+      - name: Deploy backend-main
+        working-directory: backend-main
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_BACKEND_MAIN }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment staging --ci
+
+      # ------------------------------------------------------------------
+      # service-2
+      # Runtime env needed on the Railway service: MONGODB_URI, PORT
+      # ------------------------------------------------------------------
+      - name: Deploy service-2
+        working-directory: service-2
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_SERVICE_2 }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment staging --ci
+
+      # ------------------------------------------------------------------
+      # ml-service — this step IS the "deploy the candidate model" step.
+      # ml-service/api.py resolves the model from the MLflow Model Registry
+      # itself at container startup (lifespan hook in api.py: tries stage
+      # "Production" first, falls back to "Staging"). There is no separate
+      # artifact-copy step - (re)deploying this container with the right
+      # MLflow env vars set IS deploying the current 'Staging' candidate.
+      # Runtime env needed on the Railway service: MLFLOW_TRACKING_URI,
+      # MLFLOW_TRACKING_USERNAME, MLFLOW_TRACKING_PASSWORD (DagsHub token), PORT
+      # ------------------------------------------------------------------
+      - name: Deploy ml-service (loads latest 'Staging' model from MLflow registry on boot)
+        working-directory: ml-service
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_ML_SERVICE }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment staging --ci
+
+      # ------------------------------------------------------------------
+      # Smoke test - uncomment once real staging URLs exist.
+      # ------------------------------------------------------------------
+      # - name: Smoke test staging
+      #   run: |
+      #     curl -sf "$STAGING_FRONTEND_URL" -o /dev/null
+      #     curl -sf "$STAGING_BACKEND_URL/health" | grep -q '"status":"ok"'
+      #     curl -sf "$STAGING_ML_SERVICE_URL/health" | grep -q '"status":"ok"'
