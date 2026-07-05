@@ -1,8 +1,47 @@
 services:
-  frontend:
+  frontend: {}
 
-  backend-main:
+  backend-main: {}
 
   ml-service:
+    build: ./ml-service
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./ml-service/.env
 
-  service-2:
+  service-2: {}
+
+  # --- Monitoring stack -------------------------------------------------
+  # ml-service is now a real build+ports entry above, reachable as
+  # "ml-service:8000" on the compose network, matching monitoring/prometheus.yml.
+  # Note it still needs a real ml-service/.env (MLFLOW_TRACKING_URI/USERNAME/
+  # PASSWORD, see ml-service/.env.example) to actually start - without it, the
+  # container will crash on boot (its lifespan hook fails to load a model),
+  # and Prometheus will show the target as down, same as if it weren't
+  # running at all.
+  prometheus:
+    image: prom/prometheus:v3.8.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
