@@ -61,3 +61,23 @@ uvicorn api:app --reload
 - `GET /health` — liveness check
 - `POST /predict` — `{"text": "..."}` → `{"sentiment", "confidence", "model_version", "model_stage"}`
 - Interactive docs: `http://127.0.0.1:8000/docs` (Swagger UI) or `/redoc`
+
+## Deployment
+
+The Docker image (and Railway) run the **API**, not `train.py` — the
+container serves predictions from a model already registered in the MLflow
+Model Registry, it does not train on startup and does not need the
+DVC-tracked dataset at all. Training is a separate, manual/CI step (see
+above) that publishes a new model version; deploying the API just picks up
+whatever is currently in `Production` (or `Staging` as a fallback).
+
+Because of that, the deployment environment (Railway service settings, not
+committed here) must have these variables set directly — there is no `.env`
+file in the image:
+
+- `MLFLOW_TRACKING_URI`
+- `MLFLOW_TRACKING_USERNAME`
+- `MLFLOW_TRACKING_PASSWORD`
+
+Without them, the app fails at startup (`lifespan`) trying to reach the
+DagsHub MLflow registry.
