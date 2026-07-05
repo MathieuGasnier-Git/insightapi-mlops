@@ -1,0 +1,201 @@
+name: CD - Merge to main
+
+# Fires when staging is merged/pushed into main.
+#
+# Production only ever gets a model version through Robin's quality gate
+# (ml-service/quality_gate.py, the last job of cd-merge-to-staging.yml): it
+# smoke-tests the staging deployment and checks the candidate's accuracy,
+# and only on a pass does it call MlflowClient.transition_model_version_stage
+# to move that version to 'Production'. A failed gate leaves the registry
+# untouched (still 'Staging').
+#
+# So rather than re-deriving whether that specific run passed, this pipeline
+# checks the ground truth it wrote: if the MLflow registry has no version in
+# 'Production' stage, the gate has never passed and this workflow refuses to
+# deploy. Code reaching main is otherwise already "the exact code validated
+# on staging" by construction (main only advances via staging), and
+# ml-service always serves whatever is in the registry's 'Production' stage
+# at boot (see ml-service/api.py's lifespan hook) - so gating on the
+# registry state covers both "right code" and "right model version" without
+# needing to pass an artifact through by hand.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cd-merge-to-main
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Test suite
+    uses: ./.github/workflows/test-suite.yml
+
+  verify-production-model-gate:
+    name: Verify a model has been promoted to Production
+    needs: [tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: ml-service/requirements.txt
+
+      - name: Install ml-service dependencies
+        working-directory: ml-service
+        run: pip install -r requirements.txt
+
+      - name: Check MLflow registry for a Production-stage model
+        working-directory: ml-service
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          import mlflow
+          from mlflow.tracking import MlflowClient
+
+          MODEL_NAME = "insightapi-sentiment-classifier"
+
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          client = MlflowClient()
+          versions = client.get_latest_versions(MODEL_NAME, stages=["Production"])
+
+          if not versions:
+              print(
+                  f"No version of '{MODEL_NAME}' is in stage Production. "
+                  "The staging quality gate (ml-service/quality_gate.py, run at "
+                  "the end of cd-merge-to-staging.yml) has not promoted a "
+                  "candidate yet - refusing to deploy to production.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          version = versions[0]
+          print(
+              f"Quality gate has passed upstream: {MODEL_NAME} v{version.version} "
+              f"(run_id={version.run_id}) is in Production."
+          )
+          PY
+
+  build-and-push-images:
+    name: Build and push Docker images
+    needs: [verify-production-model-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-prefix: ${{ steps.vars.outputs.image_prefix }}
+      image-tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tags
+        id: vars
+        run: |
+          IMAGE_PREFIX=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_prefix=$IMAGE_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/frontend:production
+            ${{ steps.vars.outputs.image_prefix }}/frontend:${{ steps.vars.outputs.image_tag }}
+
+      - name: Build and push backend-main
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend-main
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/backend-main:production
+            ${{ steps.vars.outputs.image_prefix }}/backend-main:${{ steps.vars.outputs.image_tag }}
+
+      - name: Build and push service-2
+        uses: docker/build-push-action@v6
+        with:
+          context: ./service-2
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/service-2:production
+            ${{ steps.vars.outputs.image_prefix }}/service-2:${{ steps.vars.outputs.image_tag }}
+
+      - name: Build and push ml-service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ml-service
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/ml-service:production
+            ${{ steps.vars.outputs.image_prefix }}/ml-service:${{ steps.vars.outputs.image_tag }}
+
+  deploy-production:
+    name: Deploy to production (Railway)
+    needs: [build-and-push-images]
+    runs-on: ubuntu-latest
+    environment: production
+    # Same `railway up` pattern as cd-merge-to-staging.yml's deploy-staging
+    # job - see the comments there for why the GHCR push above is a build
+    # gate/audit trail rather than the artifact Railway actually runs
+    # (`railway up` has Railway build each service itself from its
+    # Dockerfile at deploy time).
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy frontend
+        working-directory: frontend
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_FRONTEND }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment production --ci
+
+      - name: Deploy backend-main
+        working-directory: backend-main
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_BACKEND_MAIN }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment production --ci
+
+      - name: Deploy service-2
+        working-directory: service-2
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_SERVICE_2 }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment production --ci
+
+      # ml-service loads whatever is in the MLflow registry's 'Production'
+      # stage at boot (see ml-service/api.py's lifespan hook) - the
+      # verify-production-model-gate job above already confirmed that stage
+      # is populated, so (re)deploying this container is what actually
+      # serves that promoted version to real traffic.
+      - name: Deploy ml-service (serves the Production-stage model from MLflow registry)
+        working-directory: ml-service
+        env:
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID_ML_SERVICE }}
+        run: railway up --service="$RAILWAY_SERVICE_ID" --environment production --ci
+
+      # Smoke test - uncomment once real production URLs exist.
+      # - name: Smoke test production
+      #   run: |
+      #     curl -sf "$PRODUCTION_FRONTEND_URL" -o /dev/null
+      #     curl -sf "$PRODUCTION_BACKEND_URL/health" | grep -q '"status":"ok"'
+      #     curl -sf "$PRODUCTION_ML_SERVICE_URL/health" | grep -q '"status":"ok"'
