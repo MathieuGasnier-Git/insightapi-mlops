@@ -1,0 +1,33 @@
+name: CI - PR to dev
+
+on:
+  pull_request:
+    branches: [dev]
+
+concurrency:
+  group: ci-pr-to-dev-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Test suite
+    uses: ./.github/workflows/test-suite.yml
+
+  build-docker-images:
+    name: Build Docker images (no push)
+    needs: [tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build frontend image
+        run: docker build -t insightapi/frontend:ci ./frontend
+
+      - name: Build backend-main image
+        run: docker build -t insightapi/backend-main:ci ./backend-main
+
+      - name: Build service-2 image
+        run: docker build -t insightapi/service-2:ci ./service-2
+
+      - name: Build ml-service image
+        run: docker build -t insightapi/ml-service:ci ./ml-service
