@@ -1,11 +1,8 @@
 import "dotenv/config";
-import express from "express";
-import { healthRouter } from "./routes/health";
+import { createApp } from "./app";
 
-const app = express();
+const app = createApp();
 const port = process.env.PORT || 3000;
-
-app.use(healthRouter);
 
 app.listen(port, () => {
   console.log(`backend-main listening on port ${port}`);
