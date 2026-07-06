@@ -35,6 +35,7 @@ jobs:
     name: Verify a model has been promoted to Production
     needs: [tests]
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
