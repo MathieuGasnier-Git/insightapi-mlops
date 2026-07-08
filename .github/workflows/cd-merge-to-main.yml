@@ -1,23 +1,5 @@
 name: CD - Merge to main
 
-# Fires when staging is merged/pushed into main.
-#
-# Production only ever gets a model version through Robin's quality gate
-# (ml-service/quality_gate.py, the last job of cd-merge-to-staging.yml): it
-# smoke-tests the staging deployment and checks the candidate's accuracy,
-# and only on a pass does it call MlflowClient.transition_model_version_stage
-# to move that version to 'Production'. A failed gate leaves the registry
-# untouched (still 'Staging').
-#
-# So rather than re-deriving whether that specific run passed, this pipeline
-# checks the ground truth it wrote: if the MLflow registry has no version in
-# 'Production' stage, the gate has never passed and this workflow refuses to
-# deploy. Code reaching main is otherwise already "the exact code validated
-# on staging" by construction (main only advances via staging), and
-# ml-service always serves whatever is in the registry's 'Production' stage
-# at boot (see ml-service/api.py's lifespan hook) - so gating on the
-# registry state covers both "right code" and "right model version" without
-# needing to pass an artifact through by hand.
 on:
   push:
     branches: [main]
@@ -35,6 +17,7 @@ jobs:
     name: Verify a model has been promoted to Production
     needs: [tests]
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
