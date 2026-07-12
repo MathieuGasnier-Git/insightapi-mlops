@@ -67,7 +67,7 @@ flowchart TD
 
 \* `backend-main` currently defaults to port 3000, same as the frontend's Next.js default — when running both locally you must override one (see Reproducibility below).
 
-Data stores: Postgres (Supabase-hosted, used by `backend-main`) and MongoDB Atlas (used by `service-2`). Experiment tracking, the model registry, and DVC's remote storage are all hosted on DagsHub.
+Data stores: Postgres (Supabase-hosted, used by `backend-main` to persist a per-user prediction history) and MongoDB Atlas (used by `service-2`). Experiment tracking, the model registry, and DVC's remote storage are all hosted on DagsHub.
 
 ### Auth flow
 
@@ -77,6 +77,10 @@ Data stores: Postgres (Supabase-hosted, used by `backend-main`) and MongoDB Atla
 4. The browser attaches that JWT as a Bearer token on direct, CORS-enabled calls to `/api/predict` (allowed origin controlled by `FRONTEND_URL`).
 
 This whole flow — the Google OAuth login button, the `/predict` page, and `backend-main`'s `/api/auth/exchange` + `requireAuth` + CORS — is merged into `dev` (PR #16) and verified working end to end. The Playwright e2e test covering it (`frontend/e2e/predict.spec.ts`) logs in through a test-only credentials provider rather than scripting Google's real consent screen (not automatable in CI), but everything downstream of login — the NextAuth session, the token exchange, the JWT-gated proxy call — is the real code path.
+
+### Prediction history
+
+Every `/api/predict` call also inserts a row into Postgres — input text, sentiment, confidence, model version/stage, and the caller's identity — into a `predictions` table created on boot by `ensureSchema()` (`backend-main/src/config/db.ts`). `GET /api/predict/history` returns the caller's own last 50 predictions; the `/predict` page renders this as "Your recent searches." A Postgres outage degrades this feature gracefully (logged and skipped) rather than failing the prediction itself.
 
 ## CI/CD
 
