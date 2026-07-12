@@ -16,13 +16,38 @@ function currentUser(req: Request): JwtPayload | undefined {
   return typeof req.user === "object" ? req.user : undefined;
 }
 
+/**
+ * @openapi
+ * /api/predict:
+ *   post:
+ *     summary: Get a sentiment prediction and store it in the user's history
+ *     tags: [Predict]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [text]
+ *             properties:
+ *               text: { type: string }
+ *     responses:
+ *       200:
+ *         description: Predicted sentiment
+ *       400:
+ *         description: Missing text
+ *       401:
+ *         description: Missing bearer token
+ *       502:
+ *         description: ml-service is unreachable
+ */
 predictRouter.post("/", express.json(), async (req, res) => {
   const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
   if (!text) {
     res.status(400).json({ error: "text is required" });
     return;
   }
-
   let mlRes: Response;
   try {
     mlRes = await fetch(`${ML_SERVICE_URL}/predict`, {
@@ -34,18 +59,13 @@ predictRouter.post("/", express.json(), async (req, res) => {
     res.status(502).json({ error: "ml-service is unreachable" });
     return;
   }
-
   const body = await mlRes.json().catch(() => null);
   if (!mlRes.ok || !body) {
     res.status(mlRes.status || 502).json(body ?? { error: "ml-service request failed" });
     return;
   }
-
   const prediction = body as MlServiceResponse;
   const user = currentUser(req);
-
-  // History is a nice-to-have on top of the prediction itself - a DB hiccup
-  // here shouldn't turn a working prediction into a failed request.
   try {
     await pool.query(
       `INSERT INTO predictions
@@ -64,17 +84,28 @@ predictRouter.post("/", express.json(), async (req, res) => {
   } catch (err) {
     console.error("Failed to record prediction history:", err);
   }
-
   res.status(200).json(prediction);
 });
 
+/**
+ * @openapi
+ * /api/predict/history:
+ *   get:
+ *     summary: Get the authenticated user's prediction history
+ *     tags: [Predict]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: List of past predictions
+ *       401:
+ *         description: Missing bearer token
+ */
 predictRouter.get("/history", async (req, res) => {
   const user = currentUser(req);
   if (!user?.sub) {
     res.status(401).json({ error: "Missing bearer token" });
     return;
   }
-
   try {
     const { rows } = await pool.query(
       `SELECT id, input_text, sentiment, confidence, model_version, model_stage, created_at
