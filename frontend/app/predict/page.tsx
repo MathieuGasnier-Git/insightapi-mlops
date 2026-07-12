@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:4000";
@@ -10,12 +10,51 @@ type PredictResult = {
   confidence: number;
 };
 
+type HistoryItem = {
+  id: number;
+  input_text: string;
+  sentiment: "positive" | "negative";
+  confidence: number;
+  created_at: string;
+};
+
 export default function PredictPage() {
   const { data: session, status } = useSession();
   const [text, setText] = useState("");
   const [result, setResult] = useState<PredictResult | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  async function getToken(): Promise<string> {
+    const tokenRes = await fetch("/api/token", { method: "POST" });
+    if (!tokenRes.ok) {
+      throw new Error("Could not authenticate with backend-main");
+    }
+    const { token } = await tokenRes.json();
+    return token;
+  }
+
+  async function loadHistory(token: string) {
+    try {
+      const historyRes = await fetch(`${BACKEND_URL}/api/predict/history`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!historyRes.ok) return;
+      const { predictions } = await historyRes.json();
+      setHistory(predictions);
+    } catch {
+      // History is a nice-to-have alongside the prediction itself - a failed
+      // fetch here shouldn't surface as an error to the user.
+    }
+  }
+
+  useEffect(() => {
+    if (!session) return;
+    getToken()
+      .then(loadHistory)
+      .catch(() => {});
+  }, [session]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -24,11 +63,7 @@ export default function PredictPage() {
     setResult(null);
 
     try {
-      const tokenRes = await fetch("/api/token", { method: "POST" });
-      if (!tokenRes.ok) {
-        throw new Error("Could not authenticate with backend-main");
-      }
-      const { token } = await tokenRes.json();
+      const token = await getToken();
 
       const predictRes = await fetch(`${BACKEND_URL}/api/predict`, {
         method: "POST",
@@ -42,6 +77,7 @@ export default function PredictPage() {
         throw new Error("Prediction request failed");
       }
       setResult(await predictRes.json());
+      await loadHistory(token);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -93,6 +129,32 @@ export default function PredictPage() {
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
             Confidence: {(result.confidence * 100).toFixed(1)}%
           </p>
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="mt-12 w-full max-w-lg" data-testid="predict-history">
+          <h2 className="text-lg font-semibold tracking-tight">Your recent searches</h2>
+          <ul className="mt-4 divide-y divide-zinc-200 dark:divide-zinc-800">
+            {history.map((item) => (
+              <li key={item.id} className="flex items-start justify-between gap-4 py-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm text-zinc-700 dark:text-zinc-300">
+                    {item.input_text}
+                  </p>
+                  <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-500">
+                    {new Date(item.created_at).toLocaleString()}
+                  </p>
+                </div>
+                <div className="flex-none text-right">
+                  <p className="text-sm font-medium capitalize">{item.sentiment}</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-500">
+                    {(item.confidence * 100).toFixed(1)}%
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>
