@@ -3,6 +3,18 @@ import { pool } from "../config/db";
 
 export const healthRouter = Router();
 
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Liveness and DB connectivity check
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Service and database are healthy
+ *       503:
+ *         description: Database unreachable
+ */
 healthRouter.get("/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");

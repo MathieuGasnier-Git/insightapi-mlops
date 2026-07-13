@@ -29,15 +29,28 @@ enum Sentiment {
   NEGATIVE
 }
 
+type ReviewStats {
+  total: Int!
+  positive: Int!
+  negative: Int!
+  neutral: Int!
+}
+
 type Query {
-  reviews: [Review!]!
+  # Most recent first. Optionally filter by sentiment and paginate (limit defaults to 20, offset to 0).
+  reviews(sentiment: Sentiment, limit: Int = 20, offset: Int = 0): [Review!]!
   review(id: ID!): Review
+  reviewStats: ReviewStats!
 }
 
 type Mutation {
   createReview(input: CreateReviewInput!): Review!
+  updateReview(id: ID!, input: CreateReviewInput!): Review!
+  deleteReview(id: ID!): Boolean!
 }
 ```
+
+`updateReview` and `deleteReview` return a `NOT_FOUND` `GraphQLError` (same `extensions.code` pattern as `createReview`'s `BAD_USER_INPUT`) if `id` doesn't match an existing review.
 
 ## Example operations
 
@@ -52,11 +65,32 @@ mutation {
 }
 
 query {
-  reviews {
+  reviews(sentiment: POSITIVE, limit: 10, offset: 0) {
     id
     text
     sentiment
     createdAt
   }
+}
+
+query {
+  reviewStats {
+    total
+    positive
+    negative
+    neutral
+  }
+}
+
+mutation {
+  updateReview(id: "...", input: { text: "Updated text", sentiment: NEGATIVE }) {
+    id
+    text
+    sentiment
+  }
+}
+
+mutation {
+  deleteReview(id: "...")
 }
 ```
